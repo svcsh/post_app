@@ -1,5 +1,6 @@
 <?php
 include "db.php";
+include "Validator.php";
 
 if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
@@ -9,58 +10,82 @@ if (!isset($_SESSION['user_id'])) {
 // Get post ID from URL
 $post_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 
-$stmt = mysqli_prepare($conn, "SELECT * FROM posts WHERE id=?");
-mysqli_stmt_bind_param($stmt, "i", $post_id);
-mysqli_stmt_execute($stmt);
-$result = mysqli_stmt_get_result($stmt);
-$post = mysqli_fetch_assoc($result);
-
-if (!$post) {
-    die("Post not found!");
+if ($post_id <= 0) {
+    die("Invalid post ID!");
 }
 
-// Check if user owns the post
-if ($post['user_id'] != $_SESSION['user_id']) {
-    die("You don't have permission to edit this post!");
-}
+try {
+    // PDO Prepared Statement to fetch post
+    $stmt = $conn->prepare("SELECT id, title, content, user_id FROM posts WHERE id = ?");
+    $stmt->execute([$post_id]);
+    $post = $stmt->fetch(PDO::FETCH_ASSOC);
 
-// Handle form submission
-$error = "";
-$success = "";
+    if (!$post) {
+        die("Post not found!");
+    }
 
-if (isset($_POST['update'])) {
-    $title = trim($_POST['title']);
-    $content = trim($_POST['content']);
-    
-    if (empty($title) || empty($content)) {
-        $error = "Title and Content cannot be empty!";
-    } else {
-        $stmt = mysqli_prepare($conn, "UPDATE posts SET title=?, content=? WHERE id=?");
-        mysqli_stmt_bind_param($stmt, "ssi", $title, $content, $post_id);
+    // Check if user owns the post or is admin
+    $isOwner = ($post['user_id'] == $_SESSION['user_id']);
+    $isAdmin = ($_SESSION['role'] === 'admin');
+
+    if (!$isOwner && !$isAdmin) {
+        die("You don't have permission to edit this post!");
+    }
+
+    // Handle form submission
+    $error = "";
+    $success = "";
+
+    if (isset($_POST['update'])) {
+        // Sanitize input
+        $title = Validator::sanitize($_POST['title']);
+        $content = Validator::sanitize($_POST['content']);
         
-        if (mysqli_stmt_execute($stmt)) {
-            $success = "Post updated successfully!";
-            $post['title'] = $title;
-            $post['content'] = $content;
+        // Server-side validation
+        if (!Validator::validateTitle($title)) {
+            $error = "Title must be between 3 and 255 characters!";
+        } elseif (!Validator::validateContent($content)) {
+            $error = "Content must be at least 10 characters!";
         } else {
-            $error = "Failed to update post!";
+            try {
+                // PDO Prepared Statement for update
+                $stmt = $conn->prepare("UPDATE posts SET title = ?, content = ? WHERE id = ?");
+                
+                if ($stmt->execute([$title, $content, $post_id])) {
+                    $success = "Post updated successfully!";
+                    $post['title'] = $title;
+                    $post['content'] = $content;
+                } else {
+                    $error = "Failed to update post!";
+                }
+            } catch (PDOException $e) {
+                error_log("Update post error: " . $e->getMessage());
+                $error = "An error occurred while updating the post.";
+            }
         }
-        mysqli_stmt_close($stmt);
     }
-}
 
-// Handle delete
-if (isset($_POST['delete'])) {
-    $stmt = mysqli_prepare($conn, "DELETE FROM posts WHERE id=?");
-    mysqli_stmt_bind_param($stmt, "i", $post_id);
-    
-    if (mysqli_stmt_execute($stmt)) {
-        header("Location: index.php");
-        exit;
-    } else {
-        $error = "Failed to delete post!";
+    // Handle delete
+    if (isset($_POST['delete'])) {
+        try {
+            // PDO Prepared Statement for delete
+            $stmt = $conn->prepare("DELETE FROM posts WHERE id = ?");
+            
+            if ($stmt->execute([$post_id])) {
+                header("Location: index.php");
+                exit;
+            } else {
+                $error = "Failed to delete post!";
+            }
+        } catch (PDOException $e) {
+            error_log("Delete post error: " . $e->getMessage());
+            $error = "An error occurred while deleting the post.";
+        }
     }
-    mysqli_stmt_close($stmt);
+
+} catch (PDOException $e) {
+    error_log("Edit post error: " . $e->getMessage());
+    die("An error occurred. Please try again later.");
 }
 ?>
 
@@ -82,31 +107,60 @@ if (isset($_POST['delete'])) {
     </div>
 
     <?php if (!empty($error)): ?>
-        <div class="error-msg"><?php echo $error; ?></div>
+        <div class="error-msg"><?php echo htmlspecialchars($error); ?></div>
     <?php endif; ?>
     
     <?php if (!empty($success)): ?>
-        <div class="success-msg"><?php echo $success; ?></div>
+        <div class="success-msg"><?php echo htmlspecialchars($success); ?></div>
     <?php endif; ?>
 
     <div class="edit-card">
-        <form method="POST">
+        <form method="POST" novalidate>
             <div class="form-group">
-                <label>Title</label>
-                <input type="text" name="title" value="<?php echo htmlspecialchars($post['title']); ?>" required>
+                <label for="title">Title</label>
+                <input type="text" id="title" name="title" value="<?php echo htmlspecialchars($post['title']); ?>" required 
+                       minlength="3" maxlength="255">
+                <small class="form-hint">3-255 characters</small>
             </div>
             <div class="form-group">
-                <label>Content</label>
-                <textarea name="content" rows="10" required><?php echo htmlspecialchars($post['content']); ?></textarea>
+                <label for="content">Content</label>
+                <textarea id="content" name="content" rows="10" required minlength="10"><?php echo htmlspecialchars($post['content']); ?></textarea>
+                <small class="form-hint">Minimum 10 characters</small>
             </div>
             <div class="button-group">
                 <button type="submit" name="update" class="btn-primary">Update Post</button>
-                <button type="submit" name="delete" class="btn-danger" onclick="return confirm('Are you sure you want to delete this post?');">Delete Post</button>
+                <button type="submit" name="delete" class="btn-danger" onclick="return confirm('Are you sure you want to delete this post? This action cannot be undone.');">Delete Post</button>
             </div>
         </form>
     </div>
 
 </div>
+
+<script>
+    // Client-side validation
+    document.querySelector('form').addEventListener('submit', function(e) {
+        const title = document.getElementById('title').value.trim();
+        const content = document.getElementById('content').value.trim();
+        
+        if (!title || !content) {
+            e.preventDefault();
+            alert('Please fill in all fields!');
+            return false;
+        }
+        
+        if (title.length < 3 || title.length > 255) {
+            e.preventDefault();
+            alert('Title must be between 3 and 255 characters!');
+            return false;
+        }
+        
+        if (content.length < 10) {
+            e.preventDefault();
+            alert('Content must be at least 10 characters!');
+            return false;
+        }
+    });
+</script>
 
 </body>
 </html>

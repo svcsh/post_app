@@ -1,33 +1,43 @@
 <?php
 include "db.php";
+include "Validator.php";
 
 $error = "";
 
 if (isset($_POST['login'])) {
-    $email = trim($_POST['email']);
-    $password = $_POST['password'];
+    // Sanitize input
+    $email = Validator::sanitize($_POST['email']);
+    $password = isset($_POST['password']) ? $_POST['password'] : '';
 
-    $sql = "SELECT * FROM users WHERE email=?";
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, "s", $email);
-    mysqli_stmt_execute($stmt);
-    $result = mysqli_stmt_get_result($stmt);
-
-    if (mysqli_num_rows($result) == 1) {
-        $user = mysqli_fetch_assoc($result);
-
-        if (password_verify($password, $user['password'])) {
-            $_SESSION['user_id'] = $user['id'];
-            $_SESSION['username'] = $user['username'];
-            header("Location: index.php");
-            exit;
-        } else {
-            $error = "Invalid password!";
-        }
+    // Server-side validation
+    if (!Validator::validateEmail($email)) {
+        $error = "Please enter a valid email address!";
+    } elseif (empty($password)) {
+        $error = "Password is required!";
     } else {
-        $error = "User not found!";
+        try {
+            // PDO Prepared Statement
+            $stmt = $conn->prepare("SELECT id, username, password, role FROM users WHERE email = ?");
+            $stmt->execute([$email]);
+            $user = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if ($user && password_verify($password, $user['password'])) {
+                // Login successful - set session variables
+                $_SESSION['user_id'] = $user['id'];
+                $_SESSION['username'] = $user['username'];
+                $_SESSION['role'] = $user['role'];
+                
+                // Redirect to dashboard
+                header("Location: dashboard.php");
+                exit;
+            } else {
+                $error = "Invalid email or password!";
+            }
+        } catch (PDOException $e) {
+            error_log("Login error: " . $e->getMessage());
+            $error = "An error occurred. Please try again later.";
+        }
     }
-    mysqli_stmt_close($stmt);
 }
 ?>
 
@@ -44,17 +54,20 @@ if (isset($_POST['login'])) {
         <h2>🔐 Login</h2>
         
         <?php if (!empty($error)): ?>
-            <div class="error-msg"><?php echo $error; ?></div>
+            <div class="error-msg"><?php echo htmlspecialchars($error); ?></div>
         <?php endif; ?>
         
-        <form method="POST">
+        <form method="POST" novalidate>
             <div class="form-group">
-                <label>Email</label>
-                <input type="email" name="email" placeholder="Enter your email" required>
+                <label for="email">Email</label>
+                <input type="email" id="email" name="email" placeholder="Enter your email" required 
+                       value="<?php echo htmlspecialchars($_POST['email'] ?? ''); ?>">
+                <small class="form-hint">Valid email format required (e.g., user@example.com)</small>
             </div>
             <div class="form-group">
-                <label>Password</label>
-                <input type="password" name="password" placeholder="Enter your password" required>
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" placeholder="Enter your password" required>
+                <small class="form-hint">Case sensitive</small>
             </div>
             <button type="submit" name="login" class="btn-primary">Login</button>
         </form>
@@ -63,5 +76,28 @@ if (isset($_POST['login'])) {
     </div>
 </div>
 
+<script>
+    // Client-side validation
+    document.querySelector('form').addEventListener('submit', function(e) {
+        const email = document.getElementById('email').value.trim();
+        const password = document.getElementById('password').value;
+        
+        if (!email || !password) {
+            e.preventDefault();
+            alert('Please fill in all fields!');
+            return false;
+        }
+        
+        // Email format validation
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+            e.preventDefault();
+            alert('Please enter a valid email address!');
+            return false;
+        }
+    });
+</script>
+
 </body>
 </html>
+
